@@ -6,8 +6,9 @@ import re
 import signal
 import sys
 import time
-from telethon import TelegramClient, events, errors
+from telethon import TelegramClient, events, errors, Button
 from telethon.sessions import StringSession
+from telethon.tl.functions.channels import GetParticipantRequest
 
 from crypto import encrypt_aes256, decrypt_aes256
 from database import (
@@ -25,28 +26,27 @@ from userbot_engine import (
     CLIENT_INFO
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] (%(name)s) %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] (%(name)s) %(message)s")
 logger = logging.getLogger("TeleGuardMain")
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8995627301:AAFWGGan0dqijbSf9oiQTyYo4Ztzi1L-sCs")
 BOT_API_ID = int(os.environ.get("BOT_API_ID", "33248589"))
 BOT_API_HASH = os.environ.get("BOT_API_HASH", "cb94a9acfa11e9aaf1195610f4144e65")
 
+# Mandatory Channel for /start verification
+REQUIRED_CHANNEL_USERNAME = "enerzonends"
+REQUIRED_CHANNEL_URL = "https://t.me/enerzonends"
+
 ADMIN_ID_RAW = os.environ.get("ADMIN_ID", "")
 ADMIN_ID = int(ADMIN_ID_RAW) if ADMIN_ID_RAW.isdigit() else None
 
-# Stores state per user: supports unlimited concurrent users
 STATES = {}
-
 bot = TelegramClient("bot_session", BOT_API_ID, BOT_API_HASH)
 STOP_EVENT = None
 RENDER_SERVER = None
 
 async def start_render_health_server():
-    """Asynchronous HTTP server to satisfy Render's port binding on 0.0.0.0:$PORT."""
+    """Starts an asynchronous HTTP server to satisfy Render's port binding on 0.0.0.0:$PORT."""
     port_env = os.environ.get("PORT")
     port = int(port_env) if port_env and port_env.isdigit() else 10000
 
@@ -60,9 +60,10 @@ async def start_render_health_server():
 
             body_dict = {
                 "status": "healthy",
-                "service": "TeleGuard Unlimited Multi-User Telegram Userbot",
+                "service": "TeleGuard Multi-User Telegram Userbot & Cloud Suite",
                 "active_userbots": len(ACTIVE_CLIENTS),
                 "bot_connected": bot.is_connected() if bot else False,
+                "required_channel": REQUIRED_CHANNEL_URL,
                 "timestamp": int(time.time()),
                 "render_port": port
             }
@@ -93,9 +94,36 @@ async def start_render_health_server():
         logger.warning(f"⚠️ [Render Health Server] Could not bind to port {port}: {exc}")
         return None
 
-@bot.on(events.NewMessage(pattern="/start"))
-async def handle_start(event):
-    uid = event.sender_id
+async def is_user_subscribed_to_channel(user_id: int) -> bool:
+    try:
+        await bot(GetParticipantRequest(
+            channel=REQUIRED_CHANNEL_USERNAME,
+            participant=user_id
+        ))
+        return True
+    except errors.UserNotParticipantError:
+        return False
+    except Exception as exc:
+        logger.debug(f"Channel membership check exception: {exc}")
+        return False
+
+async def send_channel_join_prompt(event, uid: int):
+    join_text = (
+        "📢 **MANDATORY CHANNEL VERIFICATION REQUIRED!**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "To start this Telegram Userbot, you must first join our official channel:\n\n"
+        f"👉 **Official Channel:** {REQUIRED_CHANNEL_URL}\n\n"
+        "1. Click **Join Official Channel** below.\n"
+        "2. Join the channel.\n"
+        "3. Click **✅ I Have Joined (Verify)** to unlock the Userbot!"
+    )
+    buttons = [
+        [Button.url("📢 Join Official Channel", REQUIRED_CHANNEL_URL)],
+        [Button.inline("✅ I Have Joined (Verify)", data=b"verify_channel_sub")]
+    ]
+    return await event.reply(join_text, buttons=buttons)
+
+async def prompt_onboarding(uid: int, event):
     sender = await event.get_sender()
     first_name = getattr(sender, "first_name", "Friend") or "Friend"
 
@@ -105,14 +133,13 @@ async def handle_start(event):
     if existing and is_live:
         return await event.reply(
             f"⚡ **Welcome back, {existing.get('first_name', first_name)}!**\n\n"
-            f"Your Telegram Userbot is **ONLINE & RUNNING** for number `{existing['phone']}`.\n\n"
-            f"• Storage: **AES-256-GCM** in SQLite\n"
-            f"• Cloud Engine: Running on Render\n"
-            f"• Send `/status` to view active features\n"
-            f"• Send `/controls` for userbot commands cheat sheet\n"
-            f"• Send `/logout` to terminate userbot session\n\n"
-            f"💡 **In any chat from your account, use `*` commands directly:**\n"
-            f"`*status`, `*pin`, `*stop pin`, `*nc`, `*replyall`, `*mutegc`, `*help`"
+            f"Your Telegram Userbot is **ACTIVE & RUNNING** for number `{existing['phone']}`.\n\n"
+            f"• Full userbot access is enabled on your account.\n"
+            f"• Your session string is encrypted with **AES-256** in SQLite.\n"
+            f"• Send `/status` to view active features.\n"
+            f"• Send `/controls` for userbot commands cheatsheet.\n"
+            f"• Send `/logout` to terminate userbot session.\n"
+            f"• In any chat from your account, use `*help` to explore all userbot commands!"
         )
     elif existing and not is_live:
         ok, res = await start_userbot_session(
@@ -127,13 +154,40 @@ async def handle_start(event):
 
     STATES[uid] = {"step": "WAIT_API_ID", "attempts": 0}
     welcome_text = (
-        f"👋 **Hello {first_name}! Welcome to the Multi-User Telegram Userbot.**\n"
+        f"👋 **Welcome {first_name}!**\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Anyone can connect and run their own userbot instance here!\n\n"
+        f"Your channel membership for {REQUIRED_CHANNEL_URL} has been verified! ✅\n\n"
+        f"Now authenticate your Telegram account to launch your userbot:\n"
+        f"1. **API ID** (from my.telegram.org)\n"
+        f"2. **API HASH** (from my.telegram.org)\n"
+        f"3. **Phone Number** (with country code)\n"
+        f"4. **Verification Code** (sent to your Telegram app)\n"
+        f"5. **2FA Password** (if Two-Factor Authentication is active)\n\n"
         f"👉 **Step 1/5: Please enter your numeric API ID:**\n"
-        f"_(Example: `33248589` or reply `1` to use standard default credentials)_"
+        f"_(Example: `33248589` or reply `1` to use standard default API credentials)_"
     )
     await event.reply(welcome_text)
+
+@bot.on(events.NewMessage(pattern="/start"))
+async def handle_start(event):
+    uid = event.sender_id
+    is_subscribed = await is_user_subscribed_to_channel(uid)
+    if not is_subscribed:
+        return await send_channel_join_prompt(event, uid)
+    await prompt_onboarding(uid, event)
+
+@bot.on(events.CallbackQuery(data=b"verify_channel_sub"))
+async def handle_verify_channel_sub(event):
+    uid = event.sender_id
+    is_subscribed = await is_user_subscribed_to_channel(uid)
+    if not is_subscribed:
+        return await event.answer(f"⚠️ You have not joined {REQUIRED_CHANNEL_URL} yet! Please join first.", alert=True)
+    await event.answer("✅ Channel membership verified successfully!")
+    try:
+        await event.delete()
+    except Exception:
+        pass
+    await prompt_onboarding(uid, event)
 
 @bot.on(events.NewMessage(pattern="/status"))
 async def handle_status(event):
@@ -141,50 +195,44 @@ async def handle_status(event):
     existing = get_user_session(uid)
     is_live = uid in ACTIVE_CLIENTS
     if not existing:
-        return await event.reply("ℹ️ You don't have an active userbot yet. Send `/start` to connect!")
+        return await event.reply("ℹ️ You do not have an active userbot session. Send `/start` to set one up.")
     status_badge = "🟢 ONLINE & ACTIVE" if is_live else "🔴 OFFLINE"
     await event.reply(
-        f"📊 **Userbot Status:** {status_badge}\n"
-        f"• Connected Phone: `{existing['phone']}`\n"
-        f"• Encryption: AES-256-GCM in SQLite\n"
-        f"• Total Active Users in System: {len(ACTIVE_CLIENTS)}"
+        f"📊 **Userbot Account Status**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"• Status: {status_badge}\n"
+        f"• Phone: `{existing['phone']}`\n"
+        f"• Telegram ID: `{uid}`\n"
+        f"• API ID: `{existing['api_id']}`\n"
+        f"• Verified Channel: {REQUIRED_CHANNEL_URL}\n"
+        f"• Session Encryption: **AES-256-GCM (Hardware Grade)**\n"
+        f"• Active Userbots in System: **{len(ACTIVE_CLIENTS)} accounts**\n\n"
+        f"Use commands like `*status`, `*pin`, `*nc`, `*help` directly from your Telegram account!"
     )
 
 @bot.on(events.NewMessage(pattern="/controls"))
 async def handle_controls(event):
     await event.reply(
-        "📋 **USERBOT COMMANDS CHEATSHEET**\n"
+        "📋 **USERBOT ALL COMMANDS & CONTROLS**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
         "• `*status` ➔ View live state\n"
         "• `*pin` / `*stop pin` ➔ Message auto-pinning\n"
         "• `*nc` / `*stopnc` ➔ 5-title continuous name changer\n"
         "• `*replyall` / `*gcmsgs` ➔ Rotating group auto-reply\n"
         "• `*reply` / `*dmmsgs` ➔ Rotating DM auto-reply\n"
         "• `*mutegc` / `*lockall` ➔ Auto-delete incoming spam\n"
+        "• `*clearcache` ➔ Flush memory & bytecode cache\n"
         "• `*stopall` ➔ Emergency stop"
     )
-
-@bot.on(events.NewMessage(pattern="/security_logs"))
-async def handle_security_logs(event):
-    uid = event.sender_id
-    sender = await event.get_sender()
-    username = getattr(sender, "username", "") or ""
-    if ADMIN_ID and uid != ADMIN_ID:
-        log_unauthorized_attempt(uid, username, "N/A", "ACCESS_SECURITY_LOGS", "Non-admin attempted security logs", "CRITICAL")
-        return await event.reply("⛔ Access Denied.")
-    recent = get_recent_unauthorized_attempts(10)
-    lines = ["🚨 **RECENT UNAUTHORIZED ATTEMPTS:**\n"]
-    for r in recent:
-        lines.append(f"• `[{r['timestamp'][:19]}]` User `{r['user_id']}` (@{r['username'] or 'None'}) - {r['action']}: {r['reason']}")
-    await event.reply("\n".join(lines) if recent else "🛡️ No security incidents.")
 
 @bot.on(events.NewMessage(pattern="/logout"))
 async def handle_logout(event):
     uid = event.sender_id
     if uid in ACTIVE_CLIENTS:
         await stop_userbot_session(uid)
-        await event.reply("🛑 Userbot disconnected. Send `/start` anytime to reconnect.")
+        await event.reply("🛑 Userbot session disconnected. Send `/start` anytime to reconnect.")
     else:
-        await event.reply("No running userbot found.")
+        await event.reply("No running userbot instance found.")
 
 @bot.on(events.NewMessage)
 async def handle_conversation(event):
@@ -228,7 +276,7 @@ async def handle_conversation(event):
     if step == "WAIT_PHONE":
         clean_phone = re.sub(r"[\s\-\(\)]", "", text)
         if not clean_phone.startswith("+") or not clean_phone[1:].isdigit() or len(clean_phone) < 9:
-            return await event.reply("⚠️ Invalid format. Please include country code with `+` (e.g. `+916209065785`):")
+            return await event.reply("⚠️ Invalid format. Include country code with `+` (e.g. `+916209065785`):")
 
         state["phone"] = clean_phone
         status_msg = await event.reply("⏳ Connecting to Telegram servers and requesting login code...")
@@ -248,7 +296,7 @@ async def handle_conversation(event):
         except Exception as exc:
             log_unauthorized_attempt(uid, username, clean_phone, "SEND_CODE_REQUEST", str(exc), severity="HIGH")
             del STATES[uid]
-            return await status_msg.edit(f"❌ Error initiating login: {exc}\nSend `/start` to retry.")
+            return await status_msg.edit(f"❌ Error initiating login: {exc}\nPlease send `/start` to retry.")
 
     # STEP 4: VERIFICATION CODE
     if step == "WAIT_OTP":
@@ -298,10 +346,10 @@ async def finalize_onboarding(uid: int, state: dict, event, status_msg):
     await status_msg.edit(
         f"🎉 **ACCOUNT VERIFIED & USERBOT ACTIVATED!**\n"
         f"👤 **Account:** {first_name} (`{state['phone']}`)\n"
-        f"🔒 **Security:** AES-256-GCM Encrypted in SQLite\n"
+        f"🔒 **Database Security:** AES-256-GCM Encrypted in SQLite\n"
         f"⚡ **Status:** {res}\n\n"
-        f"🚀 **You now have FULL ACCESS to the TeleGuard Userbot!**\n\n"
-        f"Use commands like `*status`, `*pin`, `*nc`, `*help` from your Telegram account!"
+        f"🚀 **You now have FULL ACCESS to your TeleGuard Userbot!**\n\n"
+        f"Try commands like `*status`, `*pin`, `*nc`, `*clearcache`, `*help` from your Telegram account!"
     )
 
 async def main():
